@@ -113,7 +113,7 @@ CREATE TABLE `person_medication` (
   `deleted_at` DATETIME DEFAULT NULL,
   
   `person_id` INT NOT NULL COMMENT 'FK para a tabela `person`',
-  `prescription_item_id` INT NULL COMMENT 'FK para a linha da receita. NULL se for registo manual.',
+  `prescription_item_id` INT NULL COMMENT 'FK para a linha da prescrição. NULL se for registo manual.',
   `medication_id` INT NOT NULL COMMENT 'FK direta para o `medication_catalog`',
   
   `dose` VARCHAR(100) NULL COMMENT 'Ex: 1 comprimido, 500mg',
@@ -131,7 +131,7 @@ CREATE TABLE `person_medication` (
   CONSTRAINT `fk_person_med_med` FOREIGN KEY (`medication_id`) REFERENCES `medication_catalog` (`id`)
 );
 
--- Tabela de Interações (Regras da IA)
+-- Tabela de Interações
 CREATE TABLE `interaction` (
   `id` INT NOT NULL AUTO_INCREMENT,
   `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -153,18 +153,22 @@ CREATE TABLE `interaction` (
 );
 
 -- Adiciona campos de input do SNS à tabela `person`
-ALTER TABLE person
-ADD COLUMN health_subsystem_code VARCHAR(10) DEFAULT '935601' COMMENT 'Código da Entidade Financeira Responsável (SPMS Tabela 95). 935601 = SNS',
-ADD COLUMN regime_comparticipacao_tipo CHAR(1) NULL COMMENT 'Tipo do regime (R=Pensionista, O=Outros) [SPMS Tabela 11]',
-ADD COLUMN regime_comparticipacao_codigo VARCHAR(10) NULL COMMENT 'Código do benefício (Ex: 2001, 3001) [SPMS Tabela 11 e 101]';
-ADD COLUMN gender CHAR(1) NULL COMMENT 'Sexo do utente: M=Masculino, F=Feminino [SPMS Tabela 7]';
+ALTER TABLE `person`
+ADD COLUMN `health_subsystem_code` VARCHAR(10) DEFAULT '935601' COMMENT 'Código da Entidade Financeira Responsável (SPMS Tabela 95). 935601 = SNS',
+ADD COLUMN `regime_comparticipacao_tipo` CHAR(1) NULL COMMENT 'Tipo do regime (R=Pensionista, O=Outros) [SPMS Tabela 11]',
+ADD COLUMN `regime_comparticipacao_codigo` VARCHAR(10) NULL COMMENT 'Código do benefício (Ex: 2001, 3001) [SPMS Tabela 11 e 101]',
+ADD COLUMN `sex` CHAR(1) NULL COMMENT 'Sexo do utente: M=Masculino, F=Feminino [SPMS Tabela 7]';
+-- Adicionar a ligação ao Médico Responsável na tabela Person
+ALTER TABLE `person`
+ADD COLUMN `medico_responsavel_id` INT NULL COMMENT 'FK para o médico responsável (tabela account)',
+ADD CONSTRAINT `fk_person_medico_resp` FOREIGN KEY (`medico_responsavel_id`) REFERENCES `account` (`id`);
 
 -- Adiciona campos de output do SNS à tabela `prescription`
 ALTER TABLE prescription
-ADD COLUMN sns_prescription_number VARCHAR(19) NULL COMMENT 'Número único da receita gerado pelo SPMS',
-ADD COLUMN sns_access_code VARCHAR(20) NULL COMMENT 'Código de acesso/PinReceita',
+ADD COLUMN sns_prescription_number VARCHAR(19) NULL COMMENT 'Número único da prescrição gerado pelo SPMS',
+ADD COLUMN sns_access_code VARCHAR(20) NULL COMMENT 'Código de acesso/PinPrescrição',
 ADD COLUMN sns_option_code VARCHAR(20) NULL COMMENT 'Código direito de opção/PinDireitoOpcao',
-ADD COLUMN sns_status VARCHAR(4) NULL DEFAULT 'EM' COMMENT 'Estado da receita no SNS. Ex: EM, DI, NA',
+ADD COLUMN sns_status VARCHAR(4) NULL DEFAULT 'EM' COMMENT 'Estado da Prescrição no SNS. Ex: EM, DI, NA',
 ADD COLUMN sns_response_log TEXT NULL COMMENT 'Log da mensagem de Resultado (sucesso ou erro) devolvida pelo SPMS';
 
 -- Adiciona campo de output do SNS à tabela `prescription_item`
@@ -175,13 +179,19 @@ ADD COLUMN sns_qr_code TEXT NULL COMMENT 'Base64 do QRPresc';
 CREATE TABLE `person_allergy` (
   `id` INT NOT NULL AUTO_INCREMENT,
   `person_id` INT NOT NULL,
-  `allergen` VARCHAR(255) NOT NULL,
+  
+  -- Ligação ao princípio ativo para a IA detetar automaticamente (Ex: ID do Ibuprofeno)
+  `active_ingredient_id` INT NULL COMMENT 'FK para o princípio ativo. NULL se for uma alergia a algo que não é um medicamento (ex: pólen) ou não listado.',
+  
+  `allergen` VARCHAR(255) NOT NULL COMMENT 'Nome textual da alergia (ex: Penicilina)',
   `reaction` TEXT NULL,
   `severity` ENUM('mild', 'moderate', 'severe') NULL,
   
   PRIMARY KEY (`id`),
   KEY `fk_allergy_person_idx` (`person_id`),
-  CONSTRAINT `fk_allergy_person` FOREIGN KEY (`person_id`) REFERENCES `person` (`id`)
+  KEY `fk_allergy_ingredient_idx` (`active_ingredient_id`),
+  CONSTRAINT `fk_allergy_person` FOREIGN KEY (`person_id`) REFERENCES `person` (`id`),
+  CONSTRAINT `fk_allergy_ingredient` FOREIGN KEY (`active_ingredient_id`) REFERENCES `medication_active_ingredient` (`id`)
 );
 
 -- Tabela de Condições Clínicas da Pessoa (Input da IA)
@@ -213,7 +223,20 @@ CREATE TABLE `person_vitals` (
   CONSTRAINT `fk_vitals_person` FOREIGN KEY (`person_id`) REFERENCES `person` (`id`)
 );
 
--- Tabela de Alertas (Output da IA)
+-- Tabela de Regras de Contraindicações (Doença vs. Princípio Ativo)
+CREATE TABLE `contraindication_rule` (
+  `id` INT NOT NULL AUTO_INCREMENT,
+  `active_ingredient_id` INT NOT NULL,
+  `icd10_code` VARCHAR(10) NOT NULL COMMENT 'O código da doença (ex: I10 para Hipertensão)',
+  `severity` ENUM('minor', 'moderate', 'major', 'contraindicated') NOT NULL,
+  `description` TEXT NOT NULL COMMENT 'Ex: Pode aumentar a pressão arterial',
+  
+  PRIMARY KEY (`id`),
+  KEY `fk_contra_ingredient_idx` (`active_ingredient_id`),
+  CONSTRAINT `fk_contra_ingredient` FOREIGN KEY (`active_ingredient_id`) REFERENCES `medication_active_ingredient` (`id`)
+);
+
+-- Tabela de Log de Alertas Clínicos (Output da IA)
 CREATE TABLE `clinical_alert_log` (
   `id` INT NOT NULL AUTO_INCREMENT,
   `created_at` DATETIME NULL DEFAULT CURRENT_TIMESTAMP,
@@ -225,8 +248,7 @@ CREATE TABLE `clinical_alert_log` (
   `alert_severity` ENUM('mild', 'moderate', 'severe') NOT NULL,
   `alert_message` TEXT NOT NULL,
   
-  `doctor_action` ENUM('ACKNOWLEDGED', 'OVERRIDDEN', 'PRESCRIPTION_CANCELLED') NULL,
-  `doctor_justification` TEXT NULL,
+  `doctor_action` ENUM('ACKNOWLEDGED', 'OVERRIDDEN', 'PRESCRIPTION_CANCELLED') NULL COMMENT 'OVERRIDDEN = Ignorou o alerta e prosseguiu',
   
   PRIMARY KEY (`id`),
   KEY `fk_alert_person_idx` (`person_id`),
